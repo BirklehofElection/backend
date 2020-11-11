@@ -27,10 +27,21 @@ package de.birklehof.election.backend.user;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.stereotype.Component;
 
+import java.util.Optional;
+
 @Component
 public interface UserController {
 
-    boolean hasVoted(@NotNull String userId);
+    boolean hasVoted(@NotNull String token);
 
-    void setHasVoted(@NotNull String userId);
+    void setHasVoted(@NotNull String token);
+
+    @NotNull
+    Optional<String> getUserIdOfToken(@NotNull String token);
+
+    @NotNull
+    Optional<String> generateToken(@NotNull String userId);
+
+    @NotNull
+    TokenValidateResult validateToken(@NotNull String token);
 }

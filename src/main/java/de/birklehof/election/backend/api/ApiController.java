@@ -25,7 +25,7 @@
 package de.birklehof.election.backend.api;
 
 import org.jetbrains.annotations.NotNull;
-import org.springframework.web.servlet.view.RedirectView;
+import org.springframework.http.ResponseEntity;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -33,10 +33,11 @@ import javax.servlet.http.HttpServletResponse;
 public interface ApiController {
 
     @NotNull
-    RedirectView handleLogin(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @NotNull String username, @NotNull String password);
+    ResponseEntity<String> handleTokenRequest(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @NotNull String email);
 
     @NotNull
-    RedirectView vote(@NotNull HttpServletRequest request, @NotNull String votedTeam);
+    ResponseEntity<String> vote(@NotNull HttpServletRequest request, @NotNull String token, @NotNull String votedTeam);
 
-    int getVotes(@NotNull String team);
+    @NotNull
+    ResponseEntity<String> validateToken(@NotNull HttpServletRequest request, @NotNull String token);
 }

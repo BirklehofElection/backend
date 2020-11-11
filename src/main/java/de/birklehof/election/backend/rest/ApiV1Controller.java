@@ -24,55 +24,45 @@
  */
 package de.birklehof.election.backend.rest;
 
-import com.google.common.base.Ticker;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
-import com.google.common.collect.Maps;
+import com.github.derrop.documents.DefaultDocument;
 import com.google.common.hash.Hashing;
 import de.birklehof.election.backend.api.ApiController;
-import de.birklehof.election.backend.intranet.AuthResponse;
-import de.birklehof.election.backend.intranet.IntranetAuth;
+import de.birklehof.election.backend.mail.GMailService;
 import de.birklehof.election.backend.teams.SQLTeamController;
-import de.birklehof.election.backend.teams.Team;
 import de.birklehof.election.backend.teams.TeamController;
 import de.birklehof.election.backend.user.SQLUserController;
 import de.birklehof.election.backend.user.UserController;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.CrossOrigin;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestHeader;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.servlet.view.RedirectView;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.nio.charset.StandardCharsets;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
-@CrossOrigin
 @RestController
+@CrossOrigin("*")
 @RequestMapping("/api/v1")
 @SuppressWarnings("UnstableApiUsage")
 public class ApiV1Controller implements ApiController {
 
-    private static final String MAIN_PAGE = "";
-    private static final String VOTING_PAGE = MAIN_PAGE + "";
+    private static final String VOTING_PAGE = "https://birklehofelection.github.io/vote/go.html?token=%s";
+    private static final String MESSAGE_BODY = "<html>Hi %s,<br><br>" +
+        "im Namen der Kandidaten bedanken wir uns, dass du an der Wahl teilnimmst. Bitte klicke <a href=\"%s\">hier</a>, um abzustimmen.<br><br>" +
+        "Mit freundlichen Grüßen<br>" +
+        "Charlie und Justus</html>";
+
+    private static final ResponseEntity<String> OK = ResponseEntity.ok(new DefaultDocument("success", true).toJson());
+    private static final ResponseEntity<String> UNKNOWN_TEAM = ResponseEntity.ok(new DefaultDocument("success", false).append("error", 2).toJson());
+    private static final ResponseEntity<String> ALREADY_SENT = ResponseEntity.ok(new DefaultDocument("success", false).append("error", 4).toJson());
+    private static final ResponseEntity<String> INVALID_TOKEN = ResponseEntity.ok(new DefaultDocument("success", false).append("error", 6).toJson());
+    private static final ResponseEntity<String> UNABLE_TO_SEND = ResponseEntity.ok(new DefaultDocument("success", false).append("error", 3).toJson());
+    private static final ResponseEntity<String> INVALID_EMAIL_ADDRESS = ResponseEntity.ok(new DefaultDocument("success", false).append("error", 5).toJson());
+    private static final ResponseEntity<String> ALREADY_VOTED_RESPONSE = ResponseEntity.ok(new DefaultDocument("success", false).append("error", 1).toJson());
 
     private final UserController userController;
     private final TeamController teamController;
-    private final Map<String, CompletableFuture<AuthResponse>> runningLoginSessions = Maps.newConcurrentMap();
-    private final Cache<String, Boolean> loggedInUsers = CacheBuilder.newBuilder()
-        .concurrencyLevel(4)
-        .ticker(Ticker.systemTicker())
-        .expireAfterWrite(10, TimeUnit.MINUTES)
-        .build();
 
     @Autowired
     public ApiV1Controller(SQLUserController userController, SQLTeamController teamController) {
@@ -80,67 +70,62 @@ public class ApiV1Controller implements ApiController {
         this.teamController = teamController;
     }
 
-    @NotNull
     @Override
-    @PostMapping("/login")
-    public RedirectView handleLogin(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @NotNull @RequestHeader String username, @NotNull @RequestHeader String password) {
-        AuthResponse authResponse;
-        if (this.runningLoginSessions.containsKey(request.getSession().getId())) {
-            authResponse = this.runningLoginSessions.get(request.getSession().getId()).join();
+    @PostMapping("/requestToken")
+    public @NotNull ResponseEntity<String> handleTokenRequest(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @RequestHeader @NotNull String email) {
+        if (validateEmailAddress(email)) {
+            return this.userController.generateToken(Hashing.sha256().hashString(email, StandardCharsets.UTF_8).toString()).map(token -> {
+                final var text = String.format(MESSAGE_BODY, parseFirstNameFromEmail(email), String.format(VOTING_PAGE, token));
+                if (GMailService.sendMessage(email, "Election Verification", text)) {
+                    return OK;
+                } else {
+                    return UNABLE_TO_SEND;
+                }
+            }).orElse(ALREADY_SENT);
         } else {
-            // Register a future for users without any time
-            this.runningLoginSessions.put(request.getSession().getId(), new CompletableFuture<>());
-            // now try the actual login to the intranet
-            authResponse = IntranetAuth.tryLogin(username, password);
+            return INVALID_EMAIL_ADDRESS;
         }
+    }
 
-        RedirectView result;
-        if (authResponse.getCode() == HttpStatus.MOVED_PERMANENTLY.value()) {
-            if (authResponse.isSuccess()) {
-                var usernameHash = Hashing.sha256().hashString(username, StandardCharsets.UTF_8).toString();
-                this.loggedInUsers.put(usernameHash, Boolean.TRUE);
-                request.getSession().setAttribute("user", usernameHash);
+    @Override
+    @PostMapping("/vote")
+    public @NotNull ResponseEntity<String> vote(@NotNull HttpServletRequest request, @NotNull @RequestHeader String token, @NotNull @RequestHeader String votedTeam) {
+        return this.userController.getUserIdOfToken(token).map(userId -> {
+            if (this.userController.hasVoted(token)) {
+                return ALREADY_VOTED_RESPONSE;
+            } else {
+                return this.teamController.getTeamByName(votedTeam).map(team -> {
+                    this.userController.setHasVoted(token);
+                    team.increaseVotes();
+                    return OK;
+                }).orElse(UNKNOWN_TEAM);
             }
-            result = new RedirectView(VOTING_PAGE);
-        } else {
-            result = new RedirectView(MAIN_PAGE + "?error=3");
-        }
-
-        var future = this.runningLoginSessions.remove(request.getSession().getId());
-        if (future != null) {
-            future.complete(authResponse);
-        }
-
-        return result;
+        }).orElse(INVALID_TOKEN);
     }
 
     @Override
-    @PostMapping("/vote/{team}")
-    public @NotNull RedirectView vote(@NotNull HttpServletRequest request, @NotNull @PathVariable(required = false) String votedTeam) {
-        final var userIdObject = request.getSession().getAttribute("user");
-        if (!(userIdObject instanceof String) || this.loggedInUsers.getIfPresent(userIdObject) == null) {
-            request.getSession().invalidate();
-            return new RedirectView(MAIN_PAGE + "?error=3");
-        }
-
-        final var userId = (String) userIdObject;
-        if (this.userController.hasVoted(userId)) {
-            return new RedirectView(MAIN_PAGE + "?error=1");
-        }
-
-        final var team = this.teamController.getTeamByName(votedTeam);
-        if (team.isPresent()) {
-            this.userController.setHasVoted(userId);
-            team.get().increaseVotes();
-            return new RedirectView(VOTING_PAGE + "?success=1");
-        } else {
-            return new RedirectView(MAIN_PAGE + "?error=2");
-        }
+    @PostMapping("/validate")
+    public @NotNull ResponseEntity<String> validateToken(@NotNull HttpServletRequest request, @NotNull @RequestHeader String token) {
+        return ResponseEntity.ok(new DefaultDocument("status", this.userController.validateToken(token).ordinal()).toJson());
     }
 
-    @Override
-    @GetMapping("/votes/{team}")
-    public int getVotes(@NotNull @PathVariable String team) {
-        return this.teamController.getTeamByName(team).map(Team::getVotes).orElse(-1);
+    private static boolean validateEmailAddress(@NotNull String email) {
+        final var checkedEmail = email.toLowerCase();
+        if (!checkedEmail.endsWith("@s.birklehof.de")) {
+            return false;
+        }
+
+        var parts = checkedEmail.split("\\.");
+        if (parts.length < 4) {
+            return false;
+        }
+
+        return !parts[0].isBlank() && !parts[1].isBlank();
+    }
+
+    private static String parseFirstNameFromEmail(@NotNull String emailAddress) {
+        final var firstName = emailAddress.split("\\.")[0].toLowerCase();
+        final var firstDigit = firstName.charAt(0);
+        return firstName.replaceFirst(Character.toString(firstDigit), Character.toString(Character.toUpperCase(firstDigit)));
     }
 }

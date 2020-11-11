@@ -28,15 +28,21 @@ import com.google.common.base.Ticker;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
+import com.google.common.hash.Hashing;
 import de.birklehof.election.backend.sql.DefaultMySQLController;
 import de.birklehof.election.backend.sql.MySQLController;
 import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 @Component
+@SuppressWarnings("UnstableApiUsage")
 public class SQLUserController implements UserController {
 
     private final MySQLController sqlController;
@@ -48,11 +54,31 @@ public class SQLUserController implements UserController {
             @Override
             public Boolean load(@NotNull String userId) {
                 return SQLUserController.this.sqlController.executeQuery(
-                    "SELECT `voted` FROM `users` WHERE `userId` = ?",
+                    "SELECT `voted` FROM `users` WHERE `token` = ?",
                     statement -> statement.setString(1, userId),
                     resultSet -> resultSet.next() && resultSet.getBoolean("voted"),
                     Boolean.FALSE
                 );
+            }
+        });
+    private final LoadingCache<String, String> tokenCache = CacheBuilder.newBuilder()
+        .expireAfterAccess(30, TimeUnit.MINUTES)
+        .concurrencyLevel(4)
+        .ticker(Ticker.systemTicker())
+        .build(new CacheLoader<>() {
+            @Override
+            public String load(@NotNull String userId) throws Exception {
+                String token = SQLUserController.this.sqlController.executeQuery(
+                    "SELECT `token` FROM `users` WHERE `userId` = ?",
+                    statement -> statement.setString(1, userId),
+                    resultSet -> resultSet.next() ? resultSet.getString("token") : null,
+                    null
+                );
+                if (token != null) {
+                    return token;
+                } else {
+                    throw new ExecutionException("not in db", new NullPointerException());
+                }
             }
         });
 
@@ -60,28 +86,85 @@ public class SQLUserController implements UserController {
     public SQLUserController(DefaultMySQLController sqlController) {
         this.sqlController = sqlController;
         this.sqlController.executeUpdate(
-            "CREATE TABLE IF NOT EXISTS `users` (`userId` VARCHAR(50) PRIMARY KEY, `voted` BOOL)",
+            "CREATE TABLE IF NOT EXISTS `users` (`userId` VARCHAR(255) PRIMARY KEY, `token` VARCHAR(255), `voted` BOOL)",
             statement -> {
             }
         );
     }
 
     @Override
-    public boolean hasVoted(@NotNull String userId) {
-        return this.voteCache.getUnchecked(userId);
+    public boolean hasVoted(@NotNull String token) {
+        return this.voteCache.getUnchecked(Hashing.sha256().hashString(token, StandardCharsets.UTF_8).toString());
     }
 
     @Override
-    public void setHasVoted(@NotNull String userId) {
-        this.voteCache.put(userId, Boolean.TRUE);
+    public void setHasVoted(@NotNull String token) {
+        final var hashedToken = Hashing.sha256().hashString(token, StandardCharsets.UTF_8).toString();
+        this.voteCache.put(hashedToken, Boolean.TRUE);
         this.sqlController.executeUpdate(
-            "INSERT INTO `users` (`userId`, `voted`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `userId` = ?, `voted` = ?",
+            "UPDATE `users` SET `voted` = ? WHERE `token` = ?",
             statement -> {
-                statement.setString(1, userId);
-                statement.setBoolean(2, Boolean.TRUE);
-                statement.setString(3, userId);
-                statement.setBoolean(4, Boolean.TRUE);
+                statement.setBoolean(1, Boolean.TRUE);
+                statement.setString(2, hashedToken);
             }
         );
+    }
+
+    @Override
+    public @NotNull Optional<String> getUserIdOfToken(@NotNull String token) {
+        try {
+            final var hashedToken = Hashing.sha256().hashString(token, StandardCharsets.UTF_8).toString();
+            for (var entry : this.tokenCache.asMap().entrySet()) {
+                if (entry.getValue().equals(hashedToken)) {
+                    return Optional.of(entry.getKey());
+                }
+            }
+
+            final var userId = this.sqlController.executeQuery(
+                "SELECT `userId` FROM `users` WHERE `token` = ?",
+                statement -> statement.setString(1, hashedToken),
+                resultSet -> resultSet.next() ? resultSet.getString("token") : null,
+                null
+            );
+            if (userId != null) {
+                this.tokenCache.put(userId, token);
+            }
+            return Optional.ofNullable(userId);
+        } catch (Throwable throwable) {
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public @NotNull Optional<String> generateToken(@NotNull String userId) {
+        try {
+            this.tokenCache.get(userId);
+            return Optional.empty();
+        } catch (ExecutionException exception) {
+            final var token = randomString() + randomString();
+            final var hashedToken = Hashing.sha256().hashString(token, StandardCharsets.UTF_8).toString();
+            this.sqlController.executeUpdate(
+                "INSERT INTO `users` (`userId`, `token`, `voted`) VALUES (?, ?, ?)",
+                statement -> {
+                    statement.setString(1, userId);
+                    statement.setString(2, hashedToken);
+                    statement.setBoolean(3, Boolean.FALSE);
+                }
+            );
+            this.tokenCache.put(userId, hashedToken);
+            return Optional.of(token);
+        }
+    }
+
+    @Override
+    public @NotNull TokenValidateResult validateToken(@NotNull String token) {
+        return this.getUserIdOfToken(token).map(userId -> {
+            final var hashedToken = Hashing.sha256().hashString(token, StandardCharsets.UTF_8).toString();
+            return this.voteCache.getUnchecked(hashedToken) ? TokenValidateResult.ALREADY_USED : TokenValidateResult.OK;
+        }).orElse(TokenValidateResult.INVALID);
+    }
+
+    private static String randomString() {
+        return UUID.randomUUID().toString().replace("-", "");
     }
 }
