@@ -123,7 +123,7 @@ public class SQLUserController implements UserController {
             final var userId = this.sqlController.executeQuery(
                 "SELECT `userId` FROM `users` WHERE `token` = ?",
                 statement -> statement.setString(1, hashedToken),
-                resultSet -> resultSet.next() ? resultSet.getString("token") : null,
+                resultSet -> resultSet.next() ? resultSet.getString("userId") : null,
                 null
             );
             if (userId != null) {
