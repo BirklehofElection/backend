@@ -28,6 +28,7 @@ import com.github.derrop.documents.DefaultDocument;
 import com.google.common.hash.Hashing;
 import de.birklehof.election.backend.api.ApiController;
 import de.birklehof.election.backend.mail.GMailService;
+import de.birklehof.election.backend.queued.QueuedTaskExecutor;
 import de.birklehof.election.backend.teams.SQLTeamController;
 import de.birklehof.election.backend.teams.TeamController;
 import de.birklehof.election.backend.user.SQLUserController;
@@ -40,6 +41,7 @@ import org.springframework.web.bind.annotation.*;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @CrossOrigin("*")
@@ -90,7 +92,8 @@ public class ApiV1Controller implements ApiController {
     @Override
     @PostMapping("/vote")
     public @NotNull ResponseEntity<String> vote(@NotNull HttpServletRequest request, @NotNull @RequestHeader String token, @NotNull @RequestHeader String votedTeam) {
-        return this.userController.getUserIdOfToken(token).map(userId -> {
+        final CompletableFuture<ResponseEntity<String>> future = new CompletableFuture<>();
+        QueuedTaskExecutor.queue(() -> future.complete(this.userController.getUserIdOfToken(token).map(userId -> {
             if (this.userController.hasVoted(token)) {
                 return ALREADY_VOTED_RESPONSE;
             } else {
@@ -100,7 +103,8 @@ public class ApiV1Controller implements ApiController {
                     return OK;
                 }).orElse(UNKNOWN_TEAM);
             }
-        }).orElse(INVALID_TOKEN);
+        }).orElse(INVALID_TOKEN)));
+        return future.join();
     }
 
     @Override
