@@ -74,7 +74,8 @@ public class ApiV1Controller implements ApiController {
 
     @Override
     @PostMapping("/requestToken")
-    public @NotNull ResponseEntity<String> handleTokenRequest(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @RequestHeader @NotNull String email) {
+    public @NotNull ResponseEntity<String> handleTokenRequest(@NotNull HttpServletRequest request, @NotNull HttpServletResponse response, @RequestHeader @NotNull String InEmail) {
+        final String email = InEmail.toLowerCase();
         if (validateEmailAddress(email)) {
             return this.userController.generateToken(Hashing.sha256().hashString(email, StandardCharsets.UTF_8).toString()).map(token -> {
                 final var text = String.format(MESSAGE_BODY, parseFirstNameFromEmail(email), String.format(VOTING_PAGE, token));
